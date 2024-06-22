@@ -9,6 +9,7 @@ use reborrow::*;
 pub mod bitmagic;
 
 pub mod inplace_sct;
+pub mod sct;
 
 trait Storage: Sized {}
 impl Storage for u8 {}

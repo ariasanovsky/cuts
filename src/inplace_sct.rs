@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_cuts_regular() {
-        let dim = 256;
+        let dim = 512;
         let nrows = dim;
         let ncols = dim;
         let blocksize = 32;
@@ -376,7 +376,7 @@ mod tests {
         let A: Mat<f32> = faer::stats::StandardNormalMat { nrows, ncols }.sample(rng);
         let init_norm = A.squared_norm_l2();
 
-        let mut two_remainder = faer::scale(2.0f32) * &A;
+        let mut two_remainder: Mat<f32> = faer::scale(2.0f32) * &A;
         let mut two_remainder_transposed = faer::scale(2.0f32) * A.transpose();
         let mut helper = CutHelper::new(two_remainder.as_ref(), two_remainder_transposed.as_ref());
         let mut S = vec![0u64; (nrows.div_ceil(64)) * blocksize].into_boxed_slice();

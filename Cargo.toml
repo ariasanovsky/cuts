@@ -8,11 +8,12 @@ aligned-vec = "0.5.0"
 bytemuck = "1.16.0"
 dyn-stack = "0.10.0"
 equator = "0.2.1"
-faer = "0.18.2"
+faer = "0.19.0"
 itertools = { version = "0.13.0", default-features = false }
 pulp = { version = "0.18.12", features = ["nightly"] }
 rand = "0.8.5"
 reborrow = "0.5.5"
+safetensors = "0.4.3"
 
 [dev-dependencies]
 aligned-vec = "0.5.0"
