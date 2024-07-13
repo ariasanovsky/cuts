@@ -20,6 +20,9 @@ safetensors = "0.4.3"
 diol = "0.8.3"
 half = "2.4.1"
 rand = "0.8.5"
+clap = { version = "4.5.7", features = ["derive"] }
+eyre = "0.6.12"
+image = "0.25.1"
 
 [[bench]]
 name = "matvec"

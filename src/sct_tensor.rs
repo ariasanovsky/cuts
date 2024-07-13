@@ -177,6 +177,16 @@ impl Remainder {
     pub fn width_bits(&self) -> usize {
         32 + self.dim.iter().sum::<usize>()
     }
+
+    pub fn two_mats(&self) -> impl IntoIterator<Item = faer::MatRef<f32>> {
+        self.two_mats.iter().map(|mat| {
+            mat.as_ref()
+        })
+    }
+
+    pub fn t(&self) -> &[f32] {
+        &self.t
+    }
 }
 
 pub struct Cut {
@@ -265,6 +275,10 @@ fn bit_kron(dst: &mut [u64], lhs: &[u64], lhs_nbits: usize, rhs: &[u64], rhs_nbi
 }
 
 impl Cut {
+    pub fn c(&self) -> f32 {
+        self.c
+    }
+
     pub fn new<'a>(
         dim: &[usize],
         two_mats: impl IntoIterator<Item = faer::MatRef<'a, f32>>,
