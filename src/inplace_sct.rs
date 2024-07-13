@@ -190,7 +190,7 @@ impl CutHelper {
     }
 }
 
-fn sparse_matvec(acc: &mut [f32], two_mat: MatRef<'_, f32>, diff_indices: &[u64]) {
+pub(crate) fn sparse_matvec(acc: &mut [f32], two_mat: MatRef<'_, f32>, diff_indices: &[u64]) {
     struct Impl<'a> {
         acc: &'a mut [f32],
         two_mat: MatRef<'a, f32>,

@@ -1,51 +1,17 @@
-use aligned_vec::ABox;
+use aligned_vec::{avec, ABox};
 use core::{cell::Cell, iter};
 use dyn_stack::PodStack;
 use equator::assert;
 use rand::Rng;
 use reborrow::*;
 
+use crate::inplace_sct::sparse_matvec;
+
 pub struct Remainder {
     dim: Box<[usize]>,
     total_dim: usize,
     t: ABox<[f32]>,
-    mats: Box<[faer::Mat<f32>]>,
-}
-
-struct SubIndices {
-    basis: Box<[usize]>,
-    dim: Box<[usize]>,
-}
-
-impl SubIndices {
-    pub fn new(i: usize, dim: &[usize]) -> Self {
-        let mut i = i;
-        let order = dim.len();
-        let mut basis = vec![0usize; order].into_boxed_slice();
-
-        for axis in 0..order {
-            let dim = dim[axis];
-            basis[axis] = i % dim;
-            i /= dim;
-        }
-        Self {
-            basis,
-            dim: dim.to_vec().into_boxed_slice(),
-        }
-    }
-
-    pub fn entry(&self, axis: usize) -> (usize, usize) {
-        let row = self.basis[axis];
-        let mut col = 0;
-        let mut stride = 1usize;
-        for (a, (&basis, &dim)) in iter::zip(&self.basis, &self.dim).enumerate() {
-            if a != axis {
-                col += basis * stride;
-                stride *= dim;
-            }
-        }
-        (row, col)
-    }
+    two_mats: Box<[faer::Mat<f32>]>,
 }
 
 impl Remainder {
@@ -54,12 +20,21 @@ impl Remainder {
         let total_dim = dim.iter().product::<usize>();
         assert!(total_dim != 0);
 
-        let mut t = aligned_vec::avec![0.0f32; total_dim].into_boxed_slice();
+        let mut t = avec![0.0f32; total_dim].into_boxed_slice();
         let mut state = vec![0usize; order].into_boxed_slice();
         let mut offset = vec![0usize; order].into_boxed_slice();
 
         let mut dst_index = 0usize;
         'outer: loop {
+            let mut src_index = 0usize;
+            for &offset in &*offset {
+                src_index += offset;
+            }
+
+            t[dst_index] = tensor[src_index];
+
+            dst_index += 1;
+
             let mut pos = 0usize;
             'inner: loop {
                 if pos == order {
@@ -78,22 +53,13 @@ impl Remainder {
                     break 'inner;
                 }
             }
-
-            let mut src_index = 0usize;
-            for &offset in &*offset {
-                src_index += offset;
-            }
-
-            t[dst_index] = tensor[src_index];
-
-            dst_index += 1;
         }
 
         Self {
             dim: dim.to_vec().into_boxed_slice(),
             total_dim,
             t,
-            mats: dim
+            two_mats: dim
                 .iter()
                 .map(|&dim| faer::Mat::zeros(dim, total_dim / dim))
                 .collect(),
@@ -105,19 +71,93 @@ impl Remainder {
     }
 
     pub fn fill_matrices(&mut self) {
-        for i in 0..self.total_dim {
-            let ti = self.t[i];
-            let i = SubIndices::new(i, &self.dim);
-            for (axis, mat) in self.mats.iter_mut().enumerate() {
-                let (row, col) = i.entry(axis);
-                mat[(row, col)] = ti;
+        {
+            let dim = &*self.dim;
+            let order = dim.len();
+
+            let mut dim_acc = vec![0usize; order].into_boxed_slice();
+
+            let mut acc = 1;
+            for (dim_acc, dim) in iter::zip(&mut dim_acc, dim) {
+                *dim_acc = acc;
+                acc *= dim;
+            }
+
+            let mut state = vec![0usize; order - 1].into_boxed_slice();
+            let mut offset = vec![0usize; order - 1].into_boxed_slice();
+            let mut stride = vec![0usize; order - 1].into_boxed_slice();
+            let mut xdim = vec![0usize; order - 1].into_boxed_slice();
+
+            for axis in 0..order {
+                let t = &mut self.two_mats[axis];
+                let tensor = &*self.t;
+
+                stride.fill(0);
+                xdim.fill(0);
+
+                let mut s = 1usize;
+                for i in 0..order {
+                    if i < axis {
+                        stride[i] = s;
+                        xdim[i] = dim[i];
+                    } else if i > axis {
+                        stride[i - 1] = s;
+                        xdim[i - 1] = dim[i];
+                    }
+                    s *= dim[i];
+                }
+
+                let mut dst_col = 0usize;
+
+                state.fill(0);
+                offset.fill(0);
+
+                let axis_stride = dim_acc[axis];
+
+                'outer: loop {
+                    let mut src_index = 0;
+                    for &offset in &*offset {
+                        src_index += offset;
+                    }
+
+                    {
+                        let t = t.as_mut().col_mut(dst_col);
+                        let tensor = &tensor[src_index..];
+
+                        for (dst, src) in
+                            iter::zip(t.iter_mut(), tensor.iter().step_by(axis_stride))
+                        {
+                            *dst = 2.0 * src;
+                        }
+                    }
+                    dst_col += 1;
+
+                    let mut pos = 0usize;
+                    'inner: loop {
+                        if pos == order - 1 {
+                            break 'outer;
+                        }
+
+                        state[pos] += 1;
+                        offset[pos] += stride[pos];
+                        let carry = state[pos] == xdim[pos];
+
+                        if carry {
+                            state[pos] = 0;
+                            offset[pos] = 0;
+                            pos += 1;
+                        } else {
+                            break 'inner;
+                        }
+                    }
+                }
             }
         }
     }
 
     pub fn cut(&self, cut: &mut Cut, rng: &mut impl Rng, stack: PodStack<'_>) {
         let mut stack = stack;
-        cut.setup(rng);
+        cut.setup(self, rng, stack.rb_mut());
         loop {
             let mut improved = false;
             for axis in 0..self.dim.len() {
@@ -140,9 +180,12 @@ impl Remainder {
 }
 
 pub struct Cut {
-    c: f32,
-    s: Box<[(usize, Box<[u64]>)]>,
     total_dim: usize,
+    dim: Box<[usize]>,
+    s_old: Box<[Box<[u64]>]>,
+    s: Box<[Box<[u64]>]>,
+    s_image: Box<[ABox<[f32]>]>,
+    c: f32,
 }
 
 fn bit_kron(dst: &mut [u64], lhs: &[u64], lhs_nbits: usize, rhs: &[u64], rhs_nbits: usize) {
@@ -222,43 +265,123 @@ fn bit_kron(dst: &mut [u64], lhs: &[u64], lhs_nbits: usize, rhs: &[u64], rhs_nbi
 }
 
 impl Cut {
-    pub fn new(dim: &[usize]) -> Self {
+    pub fn new<'a>(
+        dim: &[usize],
+        two_mats: impl IntoIterator<Item = faer::MatRef<'a, f32>>,
+        stack: PodStack<'_>,
+    ) -> Self {
+        let mut stack = stack;
+        let s = dim
+            .iter()
+            .map(|&dim| vec![0u64; dim.div_ceil(64)].into_boxed_slice())
+            .collect::<Box<[_]>>();
+        let total_dim = dim.iter().product();
         Self {
-            c: f32::NEG_INFINITY,
-            s: dim
+            dim: dim.to_vec().into_boxed_slice(),
+            total_dim,
+            s_old: dim
                 .iter()
-                .map(|&dim| (dim, vec![0u64; dim.div_ceil(64)].into_boxed_slice()))
+                .enumerate()
+                .map(|(axis, _)| {
+                    let n = total_dim / dim[axis];
+                    let mut s_old = vec![0u64; n.div_ceil(64)].into_boxed_slice();
+                    Self::blowup_along(&mut s_old, axis, dim, &s, stack.rb_mut());
+                    s_old
+                })
                 .collect(),
-            total_dim: dim.iter().product(),
+            s,
+            s_image: two_mats
+                .into_iter()
+                .map(|two_m| avec![0.0_f32; two_m.nrows()].into_boxed_slice())
+                .collect(),
+            c: f32::NEG_INFINITY,
         }
     }
 
-    pub fn setup(&mut self, rng: &mut impl Rng) {
+    fn update_image(&mut self, axis: usize, remainder: &Remainder, stack: PodStack<'_>) {
+        let mut stack = stack;
+        let n = self.total_dim / self.dim[axis];
+        let (s_new, mut stack) = stack.rb_mut().make_raw::<u64>(n.div_ceil(64));
+        Self::blowup_along(s_new, axis, &self.dim, &self.s, stack.rb_mut());
+
+        let s_old = &mut *self.s_old[axis];
+
+        let (diff_indices, _) = stack.make_raw::<u64>(n);
+        let mut pos = 0usize;
+        for j in 0..n {
+            let s_neg = (s_new[j / 64] >> (j % 64)) & 1 == 1;
+            let s_neg_old = (s_old[j / 64] >> (j % 64)) & 1 == 1;
+
+            if s_neg != s_neg_old {
+                diff_indices[pos] = ((s_neg as u64) << 63) | j as u64;
+                pos += 1;
+            }
+        }
+        let diff_indices = &diff_indices[..pos];
+
+        sparse_matvec(
+            &mut self.s_image[axis],
+            remainder.two_mats[axis].as_ref(),
+            diff_indices,
+        );
+        s_old.copy_from_slice(s_new);
+    }
+
+    pub fn setup(&mut self, remainder: &Remainder, rng: &mut impl Rng, stack: PodStack<'_>) {
         self.c = f32::NEG_INFINITY;
-        self.s
-            .iter_mut()
-            .flat_map(|(_, s)| s)
-            .for_each(|s| *s = rng.gen())
+        self.s.iter_mut().flatten().for_each(|s| *s = rng.gen());
+
+        let mut stack = stack;
+        for axis in 0..self.dim.len() {
+            let n = self.total_dim / self.dim[axis];
+            let s = &mut self.s_old[axis];
+            Self::blowup_along(s, axis, &self.dim, &self.s, stack.rb_mut());
+
+            {
+                let (diff_indices, _) = stack.rb_mut().make_raw::<u64>(n);
+                let mut pos = 0usize;
+                for j in 0..n {
+                    let s_neg = (s[j / 64] >> (j % 64)) & 1 == 1;
+                    diff_indices[pos] = ((s_neg as u64) << 63) | j as u64;
+                    pos += 1;
+                }
+                let diff_indices = &diff_indices[..pos];
+
+                self.s_image[axis].fill(0.0);
+                sparse_matvec(
+                    &mut self.s_image[axis],
+                    remainder.two_mats[axis].as_ref(),
+                    diff_indices,
+                );
+            }
+
+            for x in &mut *self.s_image[axis] {
+                *x = *x * 0.5;
+            }
+        }
     }
 
     pub fn dim(&self, axis: usize) -> usize {
-        self.s[axis].0
+        self.dim[axis]
     }
 
-    pub fn improve(&mut self, axis: usize, stuff: &Remainder, stack: PodStack<'_>) -> bool {
-        let (s, stack) = stack.make_raw::<f32>(self.total_dim / self.dim(axis));
-        self.blowup_along(s, axis, stack);
+    pub fn improve(&mut self, axis: usize, remainder: &Remainder, stack: PodStack<'_>) -> bool {
+        let mut stack = stack;
+        let n = self.total_dim / self.dim(axis);
+        let (s, mut stack) = stack.rb_mut().make_raw::<u64>(n.div_ceil(64));
+        Self::blowup_along(s, axis, &self.dim, &self.s, stack.rb_mut());
+        self.update_image(axis, remainder, stack.rb_mut());
 
-        let s_image = &stuff.mats[axis] * faer::col::from_slice(&s);
-        let cut = s_image.norm_l1();
+        let s_image = &*self.s_image[axis];
+        let cut = faer::col::from_slice(s_image).norm_l1();
         let improved = if cut > self.c {
             self.c = cut;
             true
         } else {
             false
         };
-        let sa = &mut self.s[axis].1;
-        s_image.as_slice().chunks(64).zip(sa).for_each(|(si, sa)| {
+        let sa = &mut self.s[axis];
+        s_image.chunks(64).zip(sa).for_each(|(si, sa)| {
             let mut signs = 0u64;
             for (idx, &si) in si.iter().enumerate() {
                 signs |= (si.is_sign_negative() as u64) << idx;
@@ -268,28 +391,30 @@ impl Cut {
         improved
     }
 
-    pub fn blowup_along(&self, dst: &mut [f32], axis: usize, stack: PodStack<'_>) {
-        let full_len = self.total_dim / self.dim(axis);
+    fn blowup_along(
+        dst: &mut [u64],
+        axis: usize,
+        dim: &[usize],
+        s: &[Box<[u64]>],
+        stack: PodStack<'_>,
+    ) {
+        let total_dim = dim.iter().product::<usize>();
+        let full_len = total_dim / dim[axis];
         let limb_len = full_len.div_ceil(64);
 
-        let (kron, stack) = stack.make_raw::<u64>(limb_len);
+        let kron = dst;
         {
             let (tmp, _) = stack.make_raw::<u64>(limb_len);
             kron[0] = 0;
 
             let mut len = 1usize;
-            for (a, s) in self.s.iter().enumerate().rev() {
+            for (a, (&dim, s)) in iter::zip(dim, s).enumerate().rev() {
                 if a != axis {
-                    bit_kron(tmp, kron, len, &s.1, s.0);
-                    len *= s.0;
+                    bit_kron(tmp, kron, len, s, dim);
+                    len *= dim;
                     kron[..len.div_ceil(64)].copy_from_slice(&tmp[..len.div_ceil(64)]);
                 }
             }
-        }
-
-        for i in 0..full_len {
-            let signed_zero = f32::from_bits(((kron[i / 64] >> (i % 64)) as u32) << 31);
-            dst[i] = f32::copysign(1.0, signed_zero);
         }
     }
 
@@ -303,9 +428,9 @@ impl Cut {
             kron[0] = 0;
 
             let mut len = 1usize;
-            for s in self.s.iter().rev() {
-                bit_kron(tmp, kron, len, &s.1, s.0);
-                len *= s.0;
+            for (&dim, s) in iter::zip(&self.dim, &self.s).rev() {
+                bit_kron(tmp, kron, len, s, dim);
+                len *= dim;
                 kron[..len.div_ceil(64)].copy_from_slice(&tmp[..len.div_ceil(64)]);
             }
         }
@@ -331,8 +456,8 @@ mod tests {
 
     #[test]
     fn test_sct_tensor() {
-        let order = 3;
-        let dim = &*vec![8; order];
+        let dim = &*vec![64; 4];
+        let order = dim.len();
         let stride = &mut *vec![0; order];
         {
             let mut s = 1usize;
@@ -348,24 +473,6 @@ mod tests {
             .map(|_| rand_distr::StandardNormal.sample(rng))
             .collect::<Box<[_]>>();
 
-        let target_error = faer::col::from_slice(
-            &tensor
-                .iter()
-                .map(|&x| (x - bf16::from_f32(x).to_f32()))
-                .collect::<Box<[_]>>(),
-        )
-        .norm_l2();
-
-        let mut stuff = Remainder::new(tensor, &dim, &stride);
-        let init_norm = faer::col::from_slice(&stuff.t).norm_l2();
-
-        let width = 1000;
-
-        let target_bits = (total_dim * 16) as f32;
-        let width_bits = stuff.width_bits();
-
-        let mut cut = Cut::new(dim);
-
         let mut mem = {
             let sign = StackReq::new::<u64>(total_dim.div_ceil(64));
             let sign_f32 = StackReq::new::<f32>(total_dim);
@@ -373,25 +480,50 @@ mod tests {
         };
         let mut stack = PodStack::new(&mut mem);
 
+        let mut remainder = Remainder::new(tensor, &dim, &stride);
+        let init_norm = faer::col::from_slice(&remainder.t).norm_l2();
+
+        let target_error = faer::col::from_slice(
+            &tensor
+                .iter()
+                .map(|&x| (x - bf16::from_f32(x).to_f32()))
+                .collect::<Box<[_]>>(),
+        )
+        .norm_l2()
+            / init_norm;
+
+        let width = 30;
+
+        let target_bits = (total_dim * 16) as f32;
+        let width_bits = remainder.width_bits();
+
+        let mut cut = Cut::new(
+            dim,
+            remainder.two_mats.iter().map(|x| x.as_ref()),
+            stack.rb_mut(),
+        );
+
+        let now = std::time::Instant::now();
         for w in 0..width {
-            stuff.fill_matrices();
-            stuff.cut(&mut cut, rng, stack.rb_mut());
+            remainder.fill_matrices();
+            remainder.cut(&mut cut, rng, stack.rb_mut());
             {
                 let mut blowup = faer::Col::<f32>::zeros(total_dim);
                 cut.blowup_mul_add(blowup.as_slice_mut(), 1.0, stack.rb_mut());
 
-                let dot = faer::row::from_slice(&stuff.t) * blowup;
+                let dot = faer::row::from_slice(&remainder.t) * blowup;
                 let err = (dot - cut.c).abs() / f32::max(cut.c.abs(), dot.abs());
                 dbg!(w, err);
             }
-            stuff.update(&cut, stack.rb_mut());
+            remainder.update(&cut, stack.rb_mut());
             {
-                let curr_error = faer::col::from_slice(&stuff.t).norm_l2() / init_norm;
+                let curr_error = remainder.norm_l2() / init_norm;
                 let expected_width = expected_width(target_error, curr_error, w + 1);
                 let expected_bits = expected_width * width_bits as f32;
                 let expected_over_target = expected_bits / target_bits;
                 dbg!(curr_error, target_error, expected_over_target,);
             }
         }
+        dbg!(now.elapsed());
     }
 }
