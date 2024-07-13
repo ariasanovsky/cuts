@@ -10,6 +10,7 @@ pub mod bitmagic;
 
 pub mod inplace_sct;
 pub mod sct;
+pub mod sct_helper;
 
 trait Storage: Sized {}
 impl Storage for u8 {}
