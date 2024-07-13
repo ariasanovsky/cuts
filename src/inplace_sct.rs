@@ -6,13 +6,6 @@ use faer::{Col, ColMut, ColRef, MatRef};
 use rand::prelude::*;
 use reborrow::*;
 
-#[derive(Debug)]
-pub struct SignedCut {
-    pub s_sizes: (usize, usize),
-    pub t_sizes: (usize, usize),
-    pub value: f32,
-}
-
 pub struct CutHelper {
     t_signs_old: Box<[u64]>,
     s_signs_old: Box<[u64]>,
@@ -362,11 +355,11 @@ pub(crate) fn improve_with_rank_update(
 mod tests {
     use super::*;
     use dyn_stack::{GlobalPodBuffer, StackReq};
-    use faer::{linalg::temp_mat_req, solvers::SpSolverLstsq, unzipped, zipped, Mat};
+    use faer::{linalg::temp_mat_req, Mat};
 
     #[test]
     fn test_cuts_regular() {
-        let dim = 512;
+        let dim = 128;
         let nrows = dim;
         let ncols = dim;
         let blocksize = 32;

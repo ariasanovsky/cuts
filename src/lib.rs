@@ -12,6 +12,8 @@ pub mod inplace_sct;
 pub mod sct;
 pub mod sct_helper;
 
+pub mod sct_tensor;
+
 trait Storage: Sized {}
 impl Storage for u8 {}
 impl Storage for u16 {}
