@@ -1,7 +1,7 @@
 use clap::Parser;
 use cuts_v2::{sct_helper::SctHelper, sct_tensor::{Cut, Remainder}};
 use dyn_stack::{GlobalPodBuffer, PodStack, StackReq};
-use faer::Mat;
+use faer::{Col, Mat};
 use image::{open, ImageBuffer, ImageFormat, Rgb};
 use rand::{rngs::StdRng, SeedableRng};
 use reborrow::ReborrowMut;
@@ -25,6 +25,9 @@ struct Args {
     /// The number of tensors to process in parallel
     #[arg(short = 't')]
     threads: Option<usize>,
+    /// rs to process in parallel
+    #[arg(short = 'd')]
+    d: usize,
 }
 
 fn main() -> eyre::Result<()> {
@@ -34,14 +37,25 @@ fn main() -> eyre::Result<()> {
         compression_rate,
         block_size,
         threads,
+        d,
     } = Args::try_parse()?;
     let img = open(input)?.into_rgb8();
     let (nrows, ncols) = img.dimensions();
     let (nrows, ncols): (usize, usize) = (nrows as _, ncols as _);
-    let dim = [3, nrows, ncols];
+    let dim = [
+        // [nrows, ncols, 3],  // 0.12028286
+        // [3, ncols, nrows],  // 0.11290481
+        // [ncols, nrows, 3],  // 0.13887107
+        [3, nrows, ncols],  // 0.10627829
+        // [nrows, 3, ncols],  // 0.11728639
+        // [ncols, 3, nrows],  // 0.13738507
+    ][d];
     dbg!(&dim);
     let stride = [1, dim[0], dim[0] * dim[1]];
-    let t = img.pixels().flat_map(|&Rgb(p)| {
+    // let dim = [3, nrows, ncols];
+    dbg!(&dim);
+    let stride = [1, dim[0], dim[0] * dim[1]];
+    let t = img.enumerate_pixels().flat_map(|(x, y, &Rgb(p))| {
         [p[0] as f32, p[1] as f32, p[2] as f32]
     }).collect::<Vec<_>>();
     let init_norm = faer::col::from_slice(&t).norm_l2();
@@ -60,15 +74,16 @@ fn main() -> eyre::Result<()> {
     let mut cut = Cut::new(&dim, remainder.two_mats(), PodStack::new(&mut mem));
     let mut stack = PodStack::new(&mut mem);
     let rng = &mut StdRng::seed_from_u64(0);
-    let normalization = ((255 * 255 * nrows * ncols * 3) as f32).sqrt();
-    // let normalization = init_norm;
+    // let normalization = ((255 * 255 * nrows * ncols * 3) as f32).sqrt();
+    let normalization = init_norm;
+    let mut approx = Col::zeros(total_dim);
     for w in 0..width {
         remainder.fill_matrices();
         remainder.cut(&mut cut, rng, stack.rb_mut());
         {
             let mut blowup = faer::Col::<f32>::zeros(total_dim);
             cut.blowup_mul_add(blowup.as_slice_mut(), 1.0, stack.rb_mut());
-
+            approx += faer::scale(cut.c() / total_dim as f32) * &blowup;
             let dot = faer::row::from_slice(&remainder.t()) * blowup;
             let err = (dot - cut.c()).abs() / f32::max(cut.c().abs(), dot.abs());
             dbg!(w, err);
@@ -107,13 +122,17 @@ fn main() -> eyre::Result<()> {
     //     let r = mat.expand();
     //     r
     // });
-    // let out = ImageBuffer::from_fn(nrows as _, ncols as _, |i, j| {
-    //     let r = mats[0][(i as _, j as _)];
-    //     let g = mats[1][(i as _, j as _)];
-    //     let b = mats[2][(i as _, j as _)];
-    //     Rgb([to_u8(r), to_u8(g), to_u8(b)])
-    // });
-    // out.save(output)?;
+    let out = ImageBuffer::from_fn(nrows as _, ncols as _, |i, j| {
+        let i = i as usize;
+        let j = j as usize;
+        Rgb(core::array::from_fn(|c| {
+            let ijc = c * stride[0] + i * stride[1] + j * stride[2];
+            to_u8(approx[ijc])
+        }))
+    });
+    out.save(output)?;
+    let nbytes = (width * width_bits).div_ceil(8);
+    dbg!(nbytes);
     Ok(())
 }
 
