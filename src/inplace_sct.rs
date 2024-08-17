@@ -231,6 +231,54 @@ pub(crate) fn sparse_matvec(acc: &mut [f32], two_mat: MatRef<'_, f32>, diff_indi
     })
 }
 
+pub(crate) fn sparse_matvec_sign(
+    acc: &mut [f32],
+    two_mat: MatRef<'_, f32>,
+    diff_indices: &[usize],
+    negate: bool,
+) {
+    struct Impl<'a> {
+        acc: &'a mut [f32],
+        two_mat: MatRef<'a, f32>,
+        diff_indices: &'a [usize],
+        negate: bool,
+    }
+
+    impl pulp::NullaryFnOnce for Impl<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn call(self) -> Self::Output {
+            let Self {
+                acc,
+                two_mat,
+                diff_indices,
+                negate,
+            } = self;
+            for &j in diff_indices {
+                let j = (j & ((1 << 63) - 1)) as usize;
+                let col = two_mat.col(j).try_as_slice().unwrap();
+
+                if negate {
+                    for (acc, &src) in zip(&mut *acc, col) {
+                        *acc -= src;
+                    }
+                } else {
+                    for (acc, &src) in zip(&mut *acc, col) {
+                        *acc += src;
+                    }
+                }
+            }
+        }
+    }
+    pulp::Arch::new().dispatch(Impl {
+        acc,
+        two_mat,
+        diff_indices,
+        negate,
+    })
+}
+
 // acc += two * (mat + S * C * T^top) * (x_new - x_old)
 // 1. acc += two * mat * (x_new - x_old)
 // 2. acc += two * S * C * T^top * (x_new - x_old)

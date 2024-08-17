@@ -1,5 +1,5 @@
 use clap::Parser;
-use cuts_v2::sct_tensor::{Cut, Remainder};
+use cuts::sct_tensor::{Cut, Remainder};
 use dyn_stack::{GlobalPodBuffer, PodStack, StackReq};
 use faer::Col;
 use image::{open, ImageBuffer, Rgb};
@@ -32,7 +32,7 @@ fn main() -> eyre::Result<()> {
         input,
         output,
         compression_rate,
-        block_size: _,
+        block_size,
         threads: _,
     } = Args::try_parse()?;
     let img = open(input)?.into_rgb8();
@@ -40,9 +40,10 @@ fn main() -> eyre::Result<()> {
     let (nrows, ncols): (usize, usize) = (nrows as _, ncols as _);
     let dim = [3, nrows, ncols];
     let stride = [1, dim[0], dim[0] * dim[1]];
-    let t = img.pixels().flat_map(|&Rgb(p)| {
-        [p[0] as f32, p[1] as f32, p[2] as f32]
-    }).collect::<Vec<_>>();
+    let t = img
+        .pixels()
+        .flat_map(|&Rgb(p)| [p[0] as f32, p[1] as f32, p[2] as f32])
+        .collect::<Vec<_>>();
     let init_norm = faer::col::from_slice(&t).norm_l2();
     let total_dim = t.len();
     let mut remainder = Remainder::new(&t, &dim, &stride);
@@ -52,34 +53,45 @@ fn main() -> eyre::Result<()> {
     let width = width as usize;
     let nbytes = (width * width_bits).div_ceil(8);
     dbg!(width, nbytes);
+    let mut cut = Cut::new(&dim, block_size);
     let mut mem = {
-        let sign = StackReq::new::<u64>(total_dim.div_ceil(64));
-        let sign_f32 = StackReq::new::<f32>(total_dim);
-        GlobalPodBuffer::new(sign.and(sign_f32))
+        let col_dim = dim.iter().map(|&dim| total_dim / dim).max().unwrap_or(0);
+
+        let x_new = StackReq::new::<u64>(col_dim.div_ceil(64));
+        let diff_idx = StackReq::new::<usize>(col_dim);
+        let kron = StackReq::new::<u64>(total_dim.div_ceil(64));
+        let s_kron = StackReq::new::<u64>(total_dim.div_ceil(64) * block_size);
+        let t_kron = StackReq::new::<u64>(total_dim.div_ceil(64) * block_size);
+        GlobalPodBuffer::new(StackReq::any_of([
+            StackReq::all_of([x_new, diff_idx]),
+            StackReq::all_of([s_kron.or(t_kron), s_kron, t_kron]),
+            StackReq::all_of([kron, kron]),
+        ]))
     };
-    let mut cut = Cut::new(&dim, remainder.two_mats(), PodStack::new(&mut mem));
     let mut stack = PodStack::new(&mut mem);
     let rng = &mut StdRng::seed_from_u64(0);
-    // let normalization = ((255 * 255 * nrows * ncols * 3) as f32).sqrt();
     let normalization = init_norm;
     let mut approx = Col::zeros(total_dim);
-    for w in 0..width {
+    let mut w = 0;
+    while w < width {
+        let bs = Ord::min(block_size, width - w);
+
         remainder.fill_matrices();
-        remainder.cut(&mut cut, rng, stack.rb_mut());
-        {
-            let mut blowup = faer::Col::<f32>::zeros(total_dim);
-            cut.blowup_mul_add(blowup.as_slice_mut(), 1.0, stack.rb_mut());
-            approx += faer::scale(cut.c() / total_dim as f32) * &blowup;
-            let dot = faer::row::from_slice(&remainder.t()) * blowup;
-            let _err = (dot - cut.c()).abs() / f32::max(cut.c().abs(), dot.abs());
+        for _ in 0..bs {
+            remainder.cut(&mut cut, rng, stack.rb_mut());
         }
-        remainder.update(&cut, stack.rb_mut());
         {
-            let curr_error = faer::col::from_slice(&remainder.t()).norm_l2() / normalization;
-            if w % 10 == 0 {
-                println!("{w}: {curr_error}");
-            }
+            let f = 1.0 / total_dim as f32;
+            let scale = &*cut.c().iter().map(|&c| c * f).collect::<Box<[_]>>();
+            cut.flush(approx.as_slice_mut(), scale, stack.rb_mut());
         }
+        remainder.update(&mut cut, stack.rb_mut());
+        cut.reset();
+        {
+            let curr_error = remainder.norm_l2() / normalization;
+            println!("{w}: {curr_error}");
+        }
+        w += bs;
     }
     // let mut rgb: [Mat<f32>; 3] = core::array::from_fn(|_| Mat::zeros(nrows, ncols));
     // // let mut rmat: Mat<f32> = Mat::zeros(nrows, ncols);
