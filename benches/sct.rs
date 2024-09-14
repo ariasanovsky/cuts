@@ -1,6 +1,6 @@
 use aligned_vec::{avec, AVec};
 use core::iter::zip;
-use cuts_v2::SignMatRef;
+use cuts::SignMatRef;
 use diol::prelude::*;
 use equator::assert;
 use half::bf16;
@@ -694,6 +694,7 @@ fn sctvec_i8(bencher: Bencher, (m, n, compression): (usize, usize, f64)) {
     });
 }
 
+#[allow(unused)]
 fn sctvec_f32(
     bencher: Bencher,
     (m, n, compression, transpose_s, transpose_t): (usize, usize, f64, bool, bool),
@@ -713,23 +714,23 @@ fn sctvec_f32(
 
     let s = if transpose_s {
         SignMatRef::from_storage(
-            cuts_v2::MatRef::from_col_major_slice(s, width.div_ceil(64), m, width.div_ceil(64)),
+            cuts::MatRef::from_col_major_slice(s, width.div_ceil(64), m, width.div_ceil(64)),
             width,
         )
     } else {
         SignMatRef::from_storage(
-            cuts_v2::MatRef::from_col_major_slice(s, m.div_ceil(64), width, m.div_ceil(64)),
+            cuts::MatRef::from_col_major_slice(s, m.div_ceil(64), width, m.div_ceil(64)),
             m,
         )
     };
     let t = if transpose_t {
         SignMatRef::from_storage(
-            cuts_v2::MatRef::from_col_major_slice(t, width.div_ceil(64), n, width.div_ceil(64)),
+            cuts::MatRef::from_col_major_slice(t, width.div_ceil(64), n, width.div_ceil(64)),
             width,
         )
     } else {
         SignMatRef::from_storage(
-            cuts_v2::MatRef::from_col_major_slice(t, n.div_ceil(64), width, n.div_ceil(64)),
+            cuts::MatRef::from_col_major_slice(t, n.div_ceil(64), width, n.div_ceil(64)),
             n,
         )
     };
@@ -742,17 +743,17 @@ fn sctvec_f32(
         tmp.fill(0.0);
         y.fill(0.0);
         if transpose_t {
-            cuts_v2::bitmagic::matvec::matvec_f32(tmp, t, x);
+            cuts::bitmagic::matvec::matvec_f32(tmp, t, x);
         } else {
-            cuts_v2::bitmagic::tmatvec::tmatvec_f32(tmp, t, x);
+            cuts::bitmagic::tmatvec::tmatvec_f32(tmp, t, x);
         }
         for (x, &c) in zip(&mut *tmp, c) {
             *x = c * *x;
         }
         if transpose_s {
-            cuts_v2::bitmagic::tmatvec::tmatvec_f32(y, s, tmp);
+            cuts::bitmagic::tmatvec::tmatvec_f32(y, s, tmp);
         } else {
-            cuts_v2::bitmagic::matvec::matvec_f32(y, s, tmp);
+            cuts::bitmagic::matvec::matvec_f32(y, s, tmp);
         }
     })
 }

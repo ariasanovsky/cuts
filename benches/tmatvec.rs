@@ -1,5 +1,5 @@
 use aligned_vec::avec;
-use cuts_v2::{bitmagic::tmatvec, MatRef, SignMatRef};
+use cuts::{bitmagic::tmatvec, MatRef, SignMatRef};
 use diol::prelude::*;
 
 fn v4(bencher: Bencher, PlotArg(m): PlotArg) {
