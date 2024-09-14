@@ -11,14 +11,14 @@ dyn-stack = "0.10.0"
 equator = "0.2.1"
 faer = "0.19.0"
 itertools = { version = "0.13.0", default-features = false }
-pulp = { version = "0.18.12", features = ["nightly"] }
+pulp = { version = "0.18.22", features = ["nightly"] }
 rand = "0.8.5"
 rand_distr = "0.4.3"
 reborrow = "0.5.5"
 safetensors = "0.4.3"
 
 [dev-dependencies]
-diol = "0.8.3"
+diol = { version = "0.8.3", default-features = false }
 half = "2.4.1"
 rand = "0.8.5"
 clap = { version = "4.5.7", features = ["derive"] }
