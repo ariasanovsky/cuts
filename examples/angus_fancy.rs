@@ -1,13 +1,9 @@
 use core::f32;
-use std::ops::Index;
 
 use equator::assert;
-use aligned_vec::ABox;
 use clap::Parser;
-use cuts::{inplace_sct::CutHelper, sct::{Sct, SctMut, SctRef}, sct_tensor::{Cut, Remainder}};
-use dyn_stack::{GlobalPodBuffer, PodStack, StackReq};
-use faer::{linalg::temp_mat_req, mat::AsMatRef, solvers::SolverCore, Col, ColMut, ColRef, Mat, MatMut, MatRef};
-use image::{open, ImageBuffer, Rgb};
+use faer::{solvers::SolverCore, Col, ColMut, ColRef, Mat, MatMut, MatRef};
+use image::open;
 use itertools::Itertools;
 use rand::{rngs::StdRng, SeedableRng};
 use reborrow::{Reborrow, ReborrowMut};

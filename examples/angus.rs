@@ -89,7 +89,7 @@ fn main() -> eyre::Result<()> {
         cut.reset();
         {
             let curr_error = remainder.norm_l2() / normalization;
-            println!("{w}: {curr_error}");
+            println!("({w}, {curr_error}),");
         }
         w += bs;
     }
