@@ -1,3 +1,4 @@
+use core::f32;
 use std::ops::Index;
 
 use equator::assert;
@@ -5,7 +6,7 @@ use aligned_vec::ABox;
 use clap::Parser;
 use cuts::{inplace_sct::CutHelper, sct::{Sct, SctMut, SctRef}, sct_tensor::{Cut, Remainder}};
 use dyn_stack::{GlobalPodBuffer, PodStack, StackReq};
-use faer::{linalg::temp_mat_req, mat::AsMatRef, solvers::SolverCore, Col, ColRef, Mat, MatRef};
+use faer::{linalg::temp_mat_req, mat::AsMatRef, solvers::SolverCore, Col, ColMut, ColRef, Mat, MatMut, MatRef};
 use image::{open, ImageBuffer, Rgb};
 use itertools::Itertools;
 use rand::{rngs::StdRng, SeedableRng};
@@ -69,6 +70,29 @@ impl RgbTensor<f32> {
         + faer::scale(k1) * self.mat(1)
         + faer::scale(k2) * self.mat(2)
     }
+
+    fn minus(&self, smat: &SignMatrix, tmat: &SignMatrix, kmat: &SignMatrix, c: ColRef<f32>) -> Self {
+        let nrows = self.nrows;
+        let ncols = self.ncols;
+        let mut r = self.clone();
+        let mut r_col = faer::col::from_slice_mut(r.data.as_mut_slice());
+        for (((s, t), k), coe) in smat
+            .as_mat_ref()
+            .col_iter()
+            .zip(tmat.as_mat_ref().col_iter())
+            .zip(kmat.as_mat_ref().col_iter())
+            .zip(c.iter()) {
+                for c in 0..3 {
+                    for j in 0..ncols {
+                        for i in 0..nrows {
+                            let cji = i + nrows * j + c * nrows * ncols;
+                            r_col[cji] -= coe * k[c] * t[j] * s[i]
+                        }
+                    }
+                }
+            }
+        r
+    }
 }
 
 // impl<T> Index<(usize, usize, usize)> for RgbTensor<T> {
@@ -97,10 +121,21 @@ impl SignMatrix {
         self.ncols += 1
     }
 
-    fn mat(&self) -> MatRef<f32> {
+    fn as_mat_ref(&self) -> MatRef<f32> {
         faer::mat::from_column_major_slice(self.data.as_slice(), self.nrows, self.ncols)
     }
+
+    fn as_mat_mut(&mut self) -> MatMut<f32> {
+        faer::mat::from_column_major_slice_mut(self.data.as_mut_slice(), self.nrows, self.ncols)
+    }
 }
+
+const GAMMA: [[f32; 3]; 4] = [
+    [1.0, 1.0, 1.0],
+    [1.0, 1.0, -1.0],
+    [1.0, -1.0, 1.0],
+    [1.0, -1.0, -1.0],
+];
 
 fn main() -> eyre::Result<()> {
     let Args {
@@ -128,26 +163,43 @@ fn main() -> eyre::Result<()> {
     let rng = &mut StdRng::seed_from_u64(0);
     let mut smat: SignMatrix = SignMatrix::new(nrows);
     let mut tmat: SignMatrix = SignMatrix::new(ncols);
-    let mut kvecs: SignMatrix = SignMatrix::new(3);
-    let init_norm = a.col().squared_norm_l2();
-    let r = a.clone();
-    const GAMMA: [[f32; 3]; 4] = [
-        [1.0, 1.0, 1.0],
-        [1.0, 1.0, -1.0],
-        [1.0, -1.0, 1.0],
-        [1.0, -1.0, -1.0],
-    ];
+    let mut kmat: SignMatrix = SignMatrix::new(3);
+    let init_norm = a.col().norm_l2();
+    let mut r = a.clone();
     for w in 0..width {
         let r_gammas: [Mat<f32>; 4] = GAMMA.map(|k| {
             r.combine_colors(&k)
         });
         let cuts: [(Col<f32>, Col<f32>); 4] = core::array::from_fn(|i| {
-            greedy_cut(&r_gammas[i], rng)
+            greedy_cut(r_gammas[i].as_ref(), rng)
         });
-        let coefficients: [(f32, Col<f32>); 4] = core::array::from_fn(|i| {
-            regress(&a, &smat, &tmat, &cuts[i])
+        let mut coefficients: [(f32, Col<f32>); 4] = core::array::from_fn(|i| {
+            let mut smat = smat.clone();
+            smat.push(cuts[i].0.as_slice());
+            let mut tmat = tmat.clone();
+            tmat.push(cuts[i].1.as_slice());
+            let mut kmat = kmat.clone();
+            kmat.push(&GAMMA[i]);
+            regress(&a, &smat, &tmat, &kmat)
         });
-        todo!()
+        let i_max = coefficients.iter().position_max_by(|a, b| {
+            a.0.partial_cmp(&b.0).unwrap()
+        }).unwrap();
+        smat.push(cuts[i_max].0.as_slice());
+        tmat.push(cuts[i_max].1.as_slice());
+        kmat.push(GAMMA[i_max].as_slice());
+        let c = coefficients[i_max].1.as_mut();
+        r = a.minus(&smat, &tmat, &kmat, c.rb());
+        let improvements = improve_signs_then_coefficients_repeatedly(
+            &a,
+            &mut r,
+            &mut smat,
+            &mut tmat,
+            &mut kmat,
+            c
+        );
+        println!("{w}: {} improvements, error = {}", improvements, r.col().norm_l2() / init_norm);
+        // todo!()
     //     let coefficients: [(f32, Col<f32>, Col<f32>, Col<f32>); 4] = core::array::from_fn(|i| {
     //         let g = &GAMMA[i];
     //         let two_remainder =
@@ -267,15 +319,157 @@ fn u8_errors<'a>(bytes: &'a [u8], mat: MatRef<'a, f32>) -> impl Iterator<Item = 
     }))
 }
 
-fn greedy_cut(mat: &Mat<f32>, rng: &mut impl rand::Rng) -> (Col<f32>, Col<f32>) {
-    todo!()
+fn greedy_cut(mat: MatRef<f32>, rng: &mut impl rand::Rng) -> (Col<f32>, Col<f32>) {
+    let (nrows, ncols) = mat.shape();
+    let mut s = Col::from_fn(nrows, |_| if rng.gen() {
+        -1.0f32
+    } else {
+        1.0
+    });
+    let mut t = Col::from_fn(ncols, |_| if rng.gen() {
+        -1.0f32
+    } else {
+        1.0
+    });
+    let _ = improve_greedy_cut(mat, s.as_mut(), t.as_mut());
+    (s, t)
+    // let mut c = s.transpose() * mat.rb() * &t;
+    // loop {
+    //     let t_image = mat.rb() * &t;
+    //     s.as_slice_mut().iter_mut().zip(t_image.as_slice()).for_each(|(s, ti)| {
+    //         *s = ti.signum()
+    //     });
+    //     let s_image = mat.transpose() * &s;
+    //     t.as_slice_mut().iter_mut().zip(s_image.as_slice()).for_each(|(t, si)| {
+    //         *t = si.signum()
+    //     });
+    //     let c_new = s.transpose() * mat.rb() * &t;
+    //     if c_new <= c {
+    //         return (s, t)
+    //     }
+    //     c = c_new
+    // }
+}
+
+fn improve_greedy_cut(
+    mat: MatRef<f32>,
+    mut s: ColMut<f32>,
+    mut t: ColMut<f32>,
+) -> usize {
+    let mut i = 0;
+    let s_image = mat.rb().transpose() * s.rb();
+    let mut c = s_image.transpose() * t.rb();
+    let s = &mut s;
+    let t = &mut t;
+    loop {
+        let t_image = mat.rb() * t.rb();
+        s.rb_mut().iter_mut().zip(t_image.as_slice()).for_each(|(s, ti)| {
+            *s = ti.signum();
+        });
+        let s_image = mat.rb().transpose() * s.rb();
+        t.rb_mut().iter_mut().zip(s_image.as_slice()).for_each(|(t, si)| {
+            *t = si.signum()
+        });
+        let c_new = s_image.transpose() * t.rb();
+        if c_new <= c {
+            return i
+        }
+        c = c_new;
+        i += 1;
+    }
 }
 
 fn regress(
     a: &RgbTensor<f32>,
     smat: &SignMatrix,
     tmat: &SignMatrix,
-    cut: &(Col<f32>, Col<f32>)
+    kmat: &SignMatrix,
+    // cut: &(Col<f32>, Col<f32>),
+    // k: &[f32]
 ) -> (f32, Col<f32>) {
-    todo!()
+    // dbg!(smat.nrows, smat.ncols);
+    // dbg!(tmat.nrows, tmat.ncols);
+    // dbg!(kmat.nrows, kmat.ncols);
+    // panic!();
+    // let mut smat = smat.clone();
+    let smat = smat.as_mat_ref();
+    // dbg!(smat.col_iter().flat_map(|col| col.iter()).max_by(|a, b| {
+    //     a.partial_cmp(b).unwrap()
+    // }));
+    // let mut tmat = tmat.clone();
+    let tmat = tmat.as_mat_ref();
+    // let mut kmat = kmat.clone();
+    let kmat = kmat.as_mat_ref();
+    // dbg!(smat.shape(), tmat.shape(), kmat.shape());
+    let sts = smat.transpose() * smat;
+    let ttt = tmat.transpose() * tmat;
+    let ktk = kmat.transpose() * kmat;
+    let width = sts.nrows();
+    let xtx = Mat::from_fn(width, width, |i, j| {
+        sts[(i, j)] * ttt[(i, j)] * ktk[(i, j)]
+    });
+    // println!("sts = {sts:?}");
+    // println!("ttt = {ttt:?}");
+    // println!("ktk = {ktk:?}");
+    // println!("xtx = {xtx:?}");
+    let inv = xtx.cholesky(faer::Side::Upper).unwrap().inverse();
+    let xta: Col<f32> = Col::from_fn(width, |i| {
+        let dots: [f32; 3] = core::array::from_fn(|c| {
+            smat.col(i).transpose() * a.mat(c) * tmat.col(i)
+        });
+        kmat.col(i).transpose() * faer::col::from_slice(dots.as_slice())
+    });
+    let coefficients = inv * &xta;
+    let aw_norm = coefficients.transpose() * xta;
+    (aw_norm, coefficients)
+}
+
+fn improve_signs_then_coefficients_repeatedly(
+    a: &RgbTensor<f32>,
+    r: &mut RgbTensor<f32>,
+    smat: &mut SignMatrix,
+    tmat: &mut SignMatrix,
+    kmat: &mut SignMatrix,
+    mut c: ColMut<f32>,
+) -> usize {
+    let width = c.nrows();
+    let mut i = 0;
+    loop {
+        let mut improved = false;
+        for j in 0..width {
+            let mut c_j = c.rb().to_owned();
+            c_j[j] = 0.0;
+            let r_j = a.minus(smat, tmat, kmat, c_j.as_ref());
+            let k_j = kmat.as_mat_ref().col(j);
+            let k = &[k_j[0], k_j[1], k_j[2]];
+            let r_j = r_j.combine_colors(k);
+            let mut s_j = smat.as_mat_mut().col_mut(j);
+            let mut t_j = tmat.as_mat_mut().col_mut(j);
+            let improvements = improve_greedy_cut(r_j.as_ref(), s_j.as_mut(), t_j.as_mut());
+            let s_j = s_j.to_owned();
+            let t_j = t_j.to_owned();
+            if improvements != 0 {
+                i += improvements;
+                improved = true;
+                // let mut smat = smat.clone();
+                // smat.push(s_j.as_slice());
+                // let mut tmat = tmat.clone();
+                // tmat.push(t_j.as_slice());
+                // let mut tmat = tmat.clone();
+                // kmat.push(k);
+                
+                let (_, c_new) = regress(
+                    a,
+                    &smat,
+                    &tmat,
+                    kmat,
+                );
+                c.rb_mut().iter_mut().zip(c_new.iter()).for_each(|(c, c_new)| *c = *c_new);
+                *r = a.minus(smat, tmat, kmat, c.rb());
+            }
+        }
+        if !improved {
+            return i
+        }
+    }
 }
