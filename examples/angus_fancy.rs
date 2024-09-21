@@ -179,31 +179,56 @@ fn greedy_cut(mat: MatRef<f32>, rng: &mut impl rand::Rng, stack: PodStack) -> (C
         });
     }
     let s_ones = cuts::MatMut::from_col_major_slice(&mut s_ones, bit_rows, 1, bit_rows);
-    let s_ones = SignMatMut::from_storage(s_ones, nrows);
+    let mut s_ones = SignMatMut::from_storage(s_ones, nrows);
     let t_ones = cuts::MatMut::from_col_major_slice(&mut t_ones, bit_cols, 1, bit_cols);
-    let t_ones = SignMatMut::from_storage(t_ones, ncols);
+    let mut t_ones = SignMatMut::from_storage(t_ones, ncols);
 
     let _ = improve_greedy_cut(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
-        s.as_mut(),
-        t.as_mut(),
-        s_ones,
-        t_ones,
+        // s.as_mut(),
+        // t.as_mut(),
+        s_ones.rb_mut(),
+        t_ones.rb_mut(),
         stack,
     );
+
+    let mut improved_signs = 0;
+    let s_signs = s_ones.storage().col_as_slice(0);
+    s.iter_mut()
+        .zip(s_signs.iter().flat_map(|&signs| {
+            (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
+        }))
+        .for_each(|(si, s_sign)| {
+            if *si != s_sign {
+                improved_signs += 1;
+                *si = s_sign
+            }
+        });
+    let t_signs = t_ones.storage().col_as_slice(0);
+    t.iter_mut()
+        .zip(t_signs.iter().flat_map(|&signs| {
+            (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
+        }))
+        .for_each(|(ti, t_sign)| {
+            if *ti != t_sign {
+                improved_signs += 1;
+                *ti = t_sign
+            }
+        });
+
     (s, t)
 }
 
 fn improve_greedy_cut(
     two_remainder: MatRef<f32>,
     two_remainder_transposed: MatRef<f32>,
-    s: ColMut<f32>,
-    t: ColMut<f32>,
+    // s: ColMut<f32>,
+    // t: ColMut<f32>,
     mut s_ones: SignMatMut,
     mut t_ones: SignMatMut,
     stack: PodStack,
-) -> (f32, usize) {
+) -> f32 {
     let mut helper: CutHelper = CutHelper::new_with_st(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
@@ -233,30 +258,8 @@ fn improve_greedy_cut(
         core::usize::MAX,
         stack,
     );
-    let mut improved_signs = 0;
-    let s_signs = s_ones.storage().col_as_slice(0);
-    s.iter_mut()
-        .zip(s_signs.iter().flat_map(|&signs| {
-            (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
-        }))
-        .for_each(|(si, s_sign)| {
-            if *si != s_sign {
-                improved_signs += 1;
-                *si = s_sign
-            }
-        });
-    let t_signs = t_ones.storage().col_as_slice(0);
-    t.iter_mut()
-        .zip(t_signs.iter().flat_map(|&signs| {
-            (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
-        }))
-        .for_each(|(ti, t_sign)| {
-            if *ti != t_sign {
-                improved_signs += 1;
-                *ti = t_sign
-            }
-        });
-    (new_c, improved_signs)
+    new_c
+    // (new_c, improved_signs)
 }
 
 fn regress(
@@ -340,20 +343,45 @@ fn improve_signs_then_coefficients_repeatedly(
             }
 
             let s_ones = cuts::MatMut::from_col_major_slice(&mut s_ones, bit_rows, 1, bit_rows);
-            let s_ones = SignMatMut::from_storage(s_ones, nrows);
+            let mut s_ones = SignMatMut::from_storage(s_ones, nrows);
             let t_ones = cuts::MatMut::from_col_major_slice(&mut t_ones, bit_cols, 1, bit_cols);
-            let t_ones = SignMatMut::from_storage(t_ones, ncols);
-            let (_, iterations) = improve_greedy_cut(
+            let mut t_ones = SignMatMut::from_storage(t_ones, ncols);
+            let _ = improve_greedy_cut(
                 two_remainder.as_ref(),
                 two_remainder_transposed.as_ref(),
-                s_j.as_mut(),
-                t_j.as_mut(),
-                s_ones,
-                t_ones,
+                // s_j.as_mut(),
+                // t_j.as_mut(),
+                s_ones.rb_mut(),
+                t_ones.rb_mut(),
                 stack.rb_mut(),
             );
-            if iterations != 0 {
-                total_iterations += iterations;
+
+            let mut improved_signs = 0;
+            let s_signs = s_ones.storage().col_as_slice(0);
+            s_j.iter_mut()
+                .zip(s_signs.iter().flat_map(|&signs| {
+                    (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
+                }))
+                .for_each(|(si, s_sign)| {
+                    if *si != s_sign {
+                        improved_signs += 1;
+                        *si = s_sign
+                    }
+                });
+            let t_signs = t_ones.storage().col_as_slice(0);
+            t_j.iter_mut()
+                .zip(t_signs.iter().flat_map(|&signs| {
+                    (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
+                }))
+                .for_each(|(ti, t_sign)| {
+                    if *ti != t_sign {
+                        improved_signs += 1;
+                        *ti = t_sign
+                    }
+                });
+
+            if improved_signs != 0 {
+                total_iterations += improved_signs;
                 let (_, c_new) = regress(a, smat, tmat, kmat);
                 *r = a.minus(smat, tmat, kmat, c_new.as_ref());
                 improved = true;
