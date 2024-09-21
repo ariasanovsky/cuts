@@ -158,6 +158,26 @@ fn greedy_cut(mat: MatRef<f32>, rng: &mut impl rand::Rng, stack: PodStack) -> (C
     let (bit_rows, bit_cols) = (nrows.div_ceil(64), ncols.div_ceil(64));
     let mut s_ones = vec![0u64; bit_rows].into_boxed_slice();
     let mut t_ones = vec![0u64; bit_cols].into_boxed_slice();
+    {
+        // let s_ones = s_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+        s.as_ref().iter().enumerate().for_each(|(i, si)| {
+            let pos = i / 64;
+            let rem = i % 64;
+            let signs = &mut s_ones[pos];
+            if si.is_sign_negative() {
+                *signs |= 1 << rem
+            }
+        });
+        // let t_ones = t_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+        t.as_ref().iter().enumerate().for_each(|(i, ti)| {
+            let pos = i / 64;
+            let rem = i % 64;
+            let signs = &mut t_ones[pos];
+            if ti.is_sign_negative() {
+                *signs |= 1 << rem
+            }
+        });
+    }
     let s_ones = cuts::MatMut::from_col_major_slice(&mut s_ones, bit_rows, 1, bit_rows);
     let s_ones = SignMatMut::from_storage(s_ones, nrows);
     let t_ones = cuts::MatMut::from_col_major_slice(&mut t_ones, bit_cols, 1, bit_cols);
@@ -184,27 +204,6 @@ fn improve_greedy_cut(
     mut t_ones: SignMatMut,
     stack: PodStack,
 ) -> (f32, usize) {
-    let (nrows, ncols) = two_remainder.shape();
-    {
-        let s_ones = s_ones.rb_mut().storage_mut().col_as_slice_mut(0);
-        s.rb().iter().enumerate().for_each(|(i, si)| {
-            let pos = i / 64;
-            let rem = i % 64;
-            let signs = &mut s_ones[pos];
-            if si.is_sign_negative() {
-                *signs |= 1 << rem
-            }
-        });
-        let t_ones = t_ones.rb_mut().storage_mut().col_as_slice_mut(0);
-        t.rb().iter().enumerate().for_each(|(i, ti)| {
-            let pos = i / 64;
-            let rem = i % 64;
-            let signs = &mut t_ones[pos];
-            if ti.is_sign_negative() {
-                *signs |= 1 << rem
-            }
-        });
-    }
     let mut helper: CutHelper = CutHelper::new_with_st(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
@@ -223,13 +222,8 @@ fn improve_greedy_cut(
             .copied()
             .collect(),
     );
-    let (u64_rows, u64_cols) = (nrows.div_ceil(64), ncols.div_ceil(64));
-    // let s_mat = cuts::MatMut::from_col_major_slice(s_ones, u64_rows, 1, u64_rows);
-    // let mut s_mat = SignMatMut::from_storage(s_mat, nrows);
     let mut c = [0.0f32];
     let mut c = faer::col::from_slice_mut(&mut c);
-    // let t_mat = cuts::MatMut::from_col_major_slice(t_ones, u64_cols, 1, u64_cols);
-    // let mut t_mat = SignMatMut::from_storage(t_mat, ncols);
     let new_c = helper.cut_mat_inplace(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
@@ -323,6 +317,28 @@ fn improve_signs_then_coefficients_repeatedly(
             let (bit_rows, bit_cols) = (nrows.div_ceil(64), ncols.div_ceil(64));
             let mut s_ones = vec![0u64; bit_rows].into_boxed_slice();
             let mut t_ones = vec![0u64; bit_cols].into_boxed_slice();
+
+            {
+                // let s_ones = s_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+                s_j.as_ref().iter().enumerate().for_each(|(i, si)| {
+                    let pos = i / 64;
+                    let rem = i % 64;
+                    let signs = &mut s_ones[pos];
+                    if si.is_sign_negative() {
+                        *signs |= 1 << rem
+                    }
+                });
+                // let t_ones = t_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+                t_j.as_ref().iter().enumerate().for_each(|(i, ti)| {
+                    let pos = i / 64;
+                    let rem = i % 64;
+                    let signs = &mut t_ones[pos];
+                    if ti.is_sign_negative() {
+                        *signs |= 1 << rem
+                    }
+                });
+            }
+
             let s_ones = cuts::MatMut::from_col_major_slice(&mut s_ones, bit_rows, 1, bit_rows);
             let s_ones = SignMatMut::from_storage(s_ones, nrows);
             let t_ones = cuts::MatMut::from_col_major_slice(&mut t_ones, bit_cols, 1, bit_cols);
