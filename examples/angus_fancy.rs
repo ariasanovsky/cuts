@@ -63,10 +63,15 @@ fn main() -> eyre::Result<()> {
     let mut kmat: SignMatrix = SignMatrix::new(3);
     let init_norm = a.col().norm_l2();
     let mut r = a.clone();
+    let mut mem = GlobalPodBuffer::new(
+        StackReq::new::<u64>(Ord::max(nrows, ncols)).and(temp_mat_req::<f32>(1, 1).unwrap()),
+    );
+    let mut stack = PodStack::new(&mut mem);
+
     for w in 0..width {
         let r_gammas: [Mat<f32>; 4] = GAMMA.map(|k| r.combine_colors(&k));
         let cuts: [(Col<f32>, Col<f32>); 4] =
-            core::array::from_fn(|i| greedy_cut(r_gammas[i].as_ref(), rng));
+            core::array::from_fn(|i| greedy_cut(r_gammas[i].as_ref(), rng, stack.rb_mut()));
         let mut coefficients: [(f32, Col<f32>); 4] = core::array::from_fn(|i| {
             let mut smat = smat.clone();
             smat.push(cuts[i].0.as_slice());
@@ -86,7 +91,13 @@ fn main() -> eyre::Result<()> {
         let c = coefficients[i_max].1.as_mut();
         r = a.minus(&smat, &tmat, &kmat, c.rb());
         let improvements = improve_signs_then_coefficients_repeatedly(
-            &a, &mut r, &mut smat, &mut tmat, &mut kmat, c,
+            &a,
+            &mut r,
+            &mut smat,
+            &mut tmat,
+            &mut kmat,
+            c,
+            stack.rb_mut(),
         );
         let rel_error = r.col().norm_l2() / init_norm;
         let w = w + 1;
@@ -136,18 +147,21 @@ fn to_u8(x: f32) -> u8 {
     x.round() as _
 }
 
-fn greedy_cut(mat: MatRef<f32>, rng: &mut impl rand::Rng) -> (Col<f32>, Col<f32>) {
+fn greedy_cut(mat: MatRef<f32>, rng: &mut impl rand::Rng, stack: PodStack) -> (Col<f32>, Col<f32>) {
     let (nrows, ncols) = mat.shape();
     let mut s = Col::from_fn(nrows, |_| if rng.gen() { -1.0f32 } else { 1.0 });
     let mut t = Col::from_fn(ncols, |_| if rng.gen() { -1.0f32 } else { 1.0 });
-    let _ = improve_greedy_cut(mat, s.as_mut(), t.as_mut());
+    let _ = improve_greedy_cut(mat, s.as_mut(), t.as_mut(), stack);
     (s, t)
 }
 
-fn improve_greedy_cut(mat: MatRef<f32>, s: ColMut<f32>, t: ColMut<f32>) -> (f32, usize) {
+fn improve_greedy_cut(
+    mat: MatRef<f32>,
+    s: ColMut<f32>,
+    t: ColMut<f32>,
+    stack: PodStack,
+) -> (f32, usize) {
     let (nrows, ncols) = mat.shape();
-    let mut s = s;
-    let mut t = t;
     let two_remainder = faer::scale(2.0f32) * mat.rb();
     let two_remainder_transposed = two_remainder.transpose().to_owned();
     let mut s_ones = vec![0u64; nrows.div_ceil(64)].into_boxed_slice();
@@ -181,11 +195,6 @@ fn improve_greedy_cut(mat: MatRef<f32>, s: ColMut<f32>, t: ColMut<f32>) -> (f32,
     let mut c = faer::col::from_slice_mut(&mut c);
     let t_mat = cuts::MatMut::from_col_major_slice(&mut t_ones, u64_cols, 1, u64_cols);
     let mut t_mat = SignMatMut::from_storage(t_mat, ncols);
-    let mut mem = GlobalPodBuffer::new(
-        StackReq::new::<u64>(Ord::max(nrows, ncols)).and(temp_mat_req::<f32>(1, 1).unwrap()),
-    );
-    let stack = PodStack::new(&mut mem);
-
     let new_c = helper.cut_mat_inplace(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
@@ -257,7 +266,9 @@ fn improve_signs_then_coefficients_repeatedly(
     tmat: &mut SignMatrix,
     kmat: &mut SignMatrix,
     mut c: ColMut<f32>,
+    mut stack: PodStack,
 ) -> (usize, usize) {
+    let (nrows, ncols) = a.shape();
     let width = c.nrows();
     let mut total_iterations = 0;
     let mut coefficient_updates = 0;
@@ -272,7 +283,8 @@ fn improve_signs_then_coefficients_repeatedly(
             let r_j = r_j.combine_colors(k);
             let mut s_j = smat.as_mat_mut().col_mut(j);
             let mut t_j = tmat.as_mat_mut().col_mut(j);
-            let (_, iterations) = improve_greedy_cut(r_j.as_ref(), s_j.as_mut(), t_j.as_mut());
+            let (_, iterations) =
+                improve_greedy_cut(r_j.as_ref(), s_j.as_mut(), t_j.as_mut(), stack.rb_mut());
             if iterations != 0 {
                 total_iterations += iterations;
                 let (_, c_new) = regress(a, smat, tmat, kmat);
@@ -321,6 +333,10 @@ impl<T> RgbTensor<T> {
         assert!(c < 3);
         let num = self.nrows * self.ncols;
         &self.data[num * c..][..num]
+    }
+
+    fn shape(&self) -> (usize, usize) {
+        (self.nrows, self.ncols)
     }
 }
 
