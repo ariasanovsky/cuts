@@ -153,11 +153,23 @@ fn greedy_cut(mat: MatRef<f32>, rng: &mut impl rand::Rng, stack: PodStack) -> (C
     let mut t = Col::from_fn(ncols, |_| if rng.gen() { -1.0f32 } else { 1.0 });
     let two_remainder = faer::scale(2.0f32) * mat.rb();
     let two_remainder_transposed = two_remainder.transpose().to_owned();
+    // let mut s_ones = vec![0u64; nrows.div_ceil(64)].into_boxed_slice();
+    // let mut t_ones = vec![0u64; ncols.div_ceil(64)].into_boxed_slice();
+    let (bit_rows, bit_cols) = (nrows.div_ceil(64), ncols.div_ceil(64));
+    let mut s_ones = vec![0u64; bit_rows].into_boxed_slice();
+    let mut t_ones = vec![0u64; bit_cols].into_boxed_slice();
+    let s_ones = cuts::MatMut::from_col_major_slice(&mut s_ones, bit_rows, 1, bit_rows);
+    let s_ones = SignMatMut::from_storage(s_ones, nrows);
+    let t_ones = cuts::MatMut::from_col_major_slice(&mut t_ones, bit_cols, 1, bit_cols);
+    let t_ones = SignMatMut::from_storage(t_ones, ncols);
+
     let _ = improve_greedy_cut(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
         s.as_mut(),
         t.as_mut(),
+        s_ones,
+        t_ones,
         stack,
     );
     (s, t)
@@ -168,51 +180,67 @@ fn improve_greedy_cut(
     two_remainder_transposed: MatRef<f32>,
     s: ColMut<f32>,
     t: ColMut<f32>,
+    mut s_ones: SignMatMut,
+    mut t_ones: SignMatMut,
     stack: PodStack,
 ) -> (f32, usize) {
     let (nrows, ncols) = two_remainder.shape();
-    let mut s_ones = vec![0u64; nrows.div_ceil(64)].into_boxed_slice();
-    let mut t_ones = vec![0u64; ncols.div_ceil(64)].into_boxed_slice();
-    s.rb().iter().enumerate().for_each(|(i, si)| {
-        let pos = i / 64;
-        let rem = i % 64;
-        let signs = &mut s_ones[pos];
-        if si.is_sign_negative() {
-            *signs |= 1 << rem
-        }
-    });
-    t.rb().iter().enumerate().for_each(|(i, ti)| {
-        let pos = i / 64;
-        let rem = i % 64;
-        let signs = &mut t_ones[pos];
-        if ti.is_sign_negative() {
-            *signs |= 1 << rem
-        }
-    });
+    {
+        let s_ones = s_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+        s.rb().iter().enumerate().for_each(|(i, si)| {
+            let pos = i / 64;
+            let rem = i % 64;
+            let signs = &mut s_ones[pos];
+            if si.is_sign_negative() {
+                *signs |= 1 << rem
+            }
+        });
+        let t_ones = t_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+        t.rb().iter().enumerate().for_each(|(i, ti)| {
+            let pos = i / 64;
+            let rem = i % 64;
+            let signs = &mut t_ones[pos];
+            if ti.is_sign_negative() {
+                *signs |= 1 << rem
+            }
+        });
+    }
     let mut helper: CutHelper = CutHelper::new_with_st(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
-        s_ones.clone(),
-        t_ones.clone(),
+        s_ones
+            .rb()
+            .storage()
+            .col_as_slice(0)
+            .iter()
+            .copied()
+            .collect(),
+        t_ones
+            .rb()
+            .storage()
+            .col_as_slice(0)
+            .iter()
+            .copied()
+            .collect(),
     );
     let (u64_rows, u64_cols) = (nrows.div_ceil(64), ncols.div_ceil(64));
-    let s_mat = cuts::MatMut::from_col_major_slice(&mut s_ones, u64_rows, 1, u64_rows);
-    let mut s_mat = SignMatMut::from_storage(s_mat, nrows);
+    // let s_mat = cuts::MatMut::from_col_major_slice(s_ones, u64_rows, 1, u64_rows);
+    // let mut s_mat = SignMatMut::from_storage(s_mat, nrows);
     let mut c = [0.0f32];
     let mut c = faer::col::from_slice_mut(&mut c);
-    let t_mat = cuts::MatMut::from_col_major_slice(&mut t_ones, u64_cols, 1, u64_cols);
-    let mut t_mat = SignMatMut::from_storage(t_mat, ncols);
+    // let t_mat = cuts::MatMut::from_col_major_slice(t_ones, u64_cols, 1, u64_cols);
+    // let mut t_mat = SignMatMut::from_storage(t_mat, ncols);
     let new_c = helper.cut_mat_inplace(
         two_remainder.as_ref(),
         two_remainder_transposed.as_ref(),
-        s_mat.rb_mut(),
+        s_ones.rb_mut(),
         c.rb_mut(),
-        t_mat.rb_mut(),
+        t_ones.rb_mut(),
         core::usize::MAX,
         stack,
     );
     let mut improved_signs = 0;
-    let s_signs = s_mat.storage().col_as_slice(0);
+    let s_signs = s_ones.storage().col_as_slice(0);
     s.iter_mut()
         .zip(s_signs.iter().flat_map(|&signs| {
             (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
@@ -223,7 +251,7 @@ fn improve_greedy_cut(
                 *si = s_sign
             }
         });
-    let t_signs = t_mat.storage().col_as_slice(0);
+    let t_signs = t_ones.storage().col_as_slice(0);
     t.iter_mut()
         .zip(t_signs.iter().flat_map(|&signs| {
             (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
@@ -275,6 +303,7 @@ fn improve_signs_then_coefficients_repeatedly(
     mut c: ColMut<f32>,
     mut stack: PodStack,
 ) -> (usize, usize) {
+    let (nrows, ncols) = a.shape();
     let width = c.nrows();
     let mut total_iterations = 0;
     let mut coefficient_updates = 0;
@@ -291,11 +320,20 @@ fn improve_signs_then_coefficients_repeatedly(
             let mut t_j = tmat.as_mat_mut().col_mut(j);
             let two_remainder = faer::scale(2.0f32) * r_j.as_ref();
             let two_remainder_transposed = two_remainder.transpose().to_owned();
+            let (bit_rows, bit_cols) = (nrows.div_ceil(64), ncols.div_ceil(64));
+            let mut s_ones = vec![0u64; bit_rows].into_boxed_slice();
+            let mut t_ones = vec![0u64; bit_cols].into_boxed_slice();
+            let s_ones = cuts::MatMut::from_col_major_slice(&mut s_ones, bit_rows, 1, bit_rows);
+            let s_ones = SignMatMut::from_storage(s_ones, nrows);
+            let t_ones = cuts::MatMut::from_col_major_slice(&mut t_ones, bit_cols, 1, bit_cols);
+            let t_ones = SignMatMut::from_storage(t_ones, ncols);
             let (_, iterations) = improve_greedy_cut(
                 two_remainder.as_ref(),
                 two_remainder_transposed.as_ref(),
                 s_j.as_mut(),
                 t_j.as_mut(),
+                s_ones,
+                t_ones,
                 stack.rb_mut(),
             );
             if iterations != 0 {
