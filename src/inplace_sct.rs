@@ -23,6 +23,16 @@ impl CutHelper {
         let s_ones = vec![0u64; nrows.div_ceil(64)].into_boxed_slice();
         let t_ones = vec![0u64; ncols.div_ceil(64)].into_boxed_slice();
 
+        CutHelper::new_with_st(two_mat, two_mat_transposed, s_ones, t_ones)
+    }
+
+    pub fn new_with_st(
+        two_mat: MatRef<'_, f32>,
+        two_mat_transposed: MatRef<'_, f32>,
+        s_ones: Box<[u64]>,
+        t_ones: Box<[u64]>,
+    ) -> Self {
+        let (nrows, ncols) = two_mat.shape();
         let mut s_image = Col::<f32>::zeros(ncols);
         let mut t_image = Col::<f32>::zeros(nrows);
 
@@ -63,6 +73,44 @@ impl CutHelper {
         T: SignMatMut<'_>,
         rng: &mut dyn rand::RngCore,
         max_iterations: usize,
+        stack: PodStack<'_>,
+    ) -> f32 {
+        let Self {
+            t_signs,
+            t_image: _,
+            s_signs: _,
+            s_image: _,
+            t_signs_old,
+            s_signs_old: _,
+        } = self;
+        assert!(all(
+            two_remainder.row_stride() == 1,
+            two_remainder_transposed.row_stride() == 1,
+            C.nrows() > 0,
+        ));
+
+        t_signs_old.copy_from_slice(&t_signs);
+        t_signs.iter_mut().for_each(|t_sign| *t_sign = rng.gen());
+
+        self.cut_mat_inplace(
+            two_remainder,
+            two_remainder_transposed,
+            S,
+            C,
+            T,
+            max_iterations,
+            stack,
+        )
+    }
+
+    pub fn cut_mat_inplace(
+        &mut self,
+        two_remainder: MatRef<'_, f32>,
+        two_remainder_transposed: MatRef<'_, f32>,
+        S: SignMatMut<'_>,
+        C: ColMut<'_, f32>,
+        T: SignMatMut<'_>,
+        max_iterations: usize,
         mut stack: PodStack<'_>,
     ) -> f32 {
         let Self {
@@ -94,8 +142,6 @@ impl CutHelper {
         let C = C.rb();
         let C_next = C_next.get_mut(0);
 
-        t_signs_old.copy_from_slice(&t_signs);
-        t_signs.iter_mut().for_each(|t_sign| *t_sign = rng.gen());
         mul_add_with_rank_update(
             t_image.as_slice_mut(),
             two_remainder.rb(),
