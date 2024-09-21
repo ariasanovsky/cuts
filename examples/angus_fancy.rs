@@ -151,19 +151,26 @@ fn greedy_cut(mat: MatRef<f32>, rng: &mut impl rand::Rng, stack: PodStack) -> (C
     let (nrows, ncols) = mat.shape();
     let mut s = Col::from_fn(nrows, |_| if rng.gen() { -1.0f32 } else { 1.0 });
     let mut t = Col::from_fn(ncols, |_| if rng.gen() { -1.0f32 } else { 1.0 });
-    let _ = improve_greedy_cut(mat, s.as_mut(), t.as_mut(), stack);
+    let two_remainder = faer::scale(2.0f32) * mat.rb();
+    let two_remainder_transposed = two_remainder.transpose().to_owned();
+    let _ = improve_greedy_cut(
+        two_remainder.as_ref(),
+        two_remainder_transposed.as_ref(),
+        s.as_mut(),
+        t.as_mut(),
+        stack,
+    );
     (s, t)
 }
 
 fn improve_greedy_cut(
-    mat: MatRef<f32>,
+    two_remainder: MatRef<f32>,
+    two_remainder_transposed: MatRef<f32>,
     s: ColMut<f32>,
     t: ColMut<f32>,
     stack: PodStack,
 ) -> (f32, usize) {
-    let (nrows, ncols) = mat.shape();
-    let two_remainder = faer::scale(2.0f32) * mat.rb();
-    let two_remainder_transposed = two_remainder.transpose().to_owned();
+    let (nrows, ncols) = two_remainder.shape();
     let mut s_ones = vec![0u64; nrows.div_ceil(64)].into_boxed_slice();
     let mut t_ones = vec![0u64; ncols.div_ceil(64)].into_boxed_slice();
     s.rb().iter().enumerate().for_each(|(i, si)| {
@@ -268,7 +275,6 @@ fn improve_signs_then_coefficients_repeatedly(
     mut c: ColMut<f32>,
     mut stack: PodStack,
 ) -> (usize, usize) {
-    let (nrows, ncols) = a.shape();
     let width = c.nrows();
     let mut total_iterations = 0;
     let mut coefficient_updates = 0;
@@ -283,8 +289,15 @@ fn improve_signs_then_coefficients_repeatedly(
             let r_j = r_j.combine_colors(k);
             let mut s_j = smat.as_mat_mut().col_mut(j);
             let mut t_j = tmat.as_mat_mut().col_mut(j);
-            let (_, iterations) =
-                improve_greedy_cut(r_j.as_ref(), s_j.as_mut(), t_j.as_mut(), stack.rb_mut());
+            let two_remainder = faer::scale(2.0f32) * r_j.as_ref();
+            let two_remainder_transposed = two_remainder.transpose().to_owned();
+            let (_, iterations) = improve_greedy_cut(
+                two_remainder.as_ref(),
+                two_remainder_transposed.as_ref(),
+                s_j.as_mut(),
+                t_j.as_mut(),
+                stack.rb_mut(),
+            );
             if iterations != 0 {
                 total_iterations += iterations;
                 let (_, c_new) = regress(a, smat, tmat, kmat);
