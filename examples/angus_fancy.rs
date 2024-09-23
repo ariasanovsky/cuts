@@ -55,13 +55,21 @@ fn main() -> eyre::Result<()> {
         .flat_map(|c| img.pixels().map(move |p| p.0[c]))
         .collect::<Vec<_>>();
     let bytes = RgbTensor::new(bytes, nrows, ncols);
+    // let init_norm = bytes
+    //     .data
+    //     .iter()
+    //     .map(|&b| {
+    //         let b = b as i64;
+    //         b * b
+    //     })
+    //     .sum::<i64>();
+    let init_norm = 3 * nrows * ncols * 255 * 255;
     let a = bytes.clone().convert(|c| c as f32);
 
     let rng = &mut StdRng::seed_from_u64(0);
     let mut smat: SignMatrix = SignMatrix::new(nrows);
     let mut tmat: SignMatrix = SignMatrix::new(ncols);
     let mut kmat: SignMatrix = SignMatrix::new(3);
-    let init_norm = a.col().norm_l2();
     let mut r = a.clone();
     let mut mem = GlobalPodBuffer::new(
         StackReq::new::<u64>(Ord::max(nrows, ncols)).and(temp_mat_req::<f32>(1, 1).unwrap()),
@@ -90,6 +98,7 @@ fn main() -> eyre::Result<()> {
         kmat.push(GAMMA[i_max].as_slice());
         let c = coefficients[i_max].1.as_mut();
         r = a.minus(&smat, &tmat, &kmat, c.rb());
+        // let improvements = (0, 0);
         let improvements = improve_signs_then_coefficients_repeatedly(
             &a,
             &mut r,
@@ -98,15 +107,19 @@ fn main() -> eyre::Result<()> {
             &mut kmat,
             c,
             stack.rb_mut(),
+            1,
         );
-        let rel_error = r.col().norm_l2() / init_norm;
+        let approx = a.col() - r.col();
+        let rel_error =
+            ((total_error(approx.as_slice(), &bytes.data) as f64) / (init_norm as f64)).sqrt();
         let w = w + 1;
+        let nbits = w * (nrows + ncols + 3 + 32);
         println!(
-            "({}, {}, {}, {}),",
-            w, improvements.0, improvements.1, rel_error
+            "({}, {}, {}, {}, {}),",
+            w, nbits, improvements.0, improvements.1, rel_error
         );
-        if w % step == 1 || w == width {
-            let outpath = output.join(format!("{stem}-{w:04b}.jpg"));
+        if true || w % step == 1 || w == width {
+            let outpath = output.join(format!("{stem}-{w:04}.jpg"));
             let approx = a.col() - r.col();
             let output = ImageBuffer::from_fn(nrows as _, ncols as _, |i, j| {
                 let i = i as usize;
@@ -119,6 +132,18 @@ fn main() -> eyre::Result<()> {
         }
     }
     Ok(())
+}
+
+fn total_error(a: &[f32], bytes: &[u8]) -> i64 {
+    assert!(a.len() == bytes.len());
+    let mut err: i64 = 0;
+    for (a, b) in a.iter().zip(bytes.iter()) {
+        let a = a.clamp(0.0, 255.0).round() as i64;
+        let b = *b as i64;
+        let e = a - b;
+        err += e * e
+    }
+    err
 }
 
 fn u8_error(c: u8, x: f32) -> f32 {
@@ -262,6 +287,11 @@ fn improve_greedy_cut(
     // (new_c, improved_signs)
 }
 
+enum RgbVector<'a> {
+    Blowup(&'a [f32; 3], ColMut<'a, f32>),
+    Columns(ColMut<'a, f32>),
+}
+
 fn regress(
     a: &RgbTensor<f32>,
     smat: &SignMatrix,
@@ -299,12 +329,13 @@ fn improve_signs_then_coefficients_repeatedly(
     kmat: &mut SignMatrix,
     mut c: ColMut<f32>,
     mut stack: PodStack,
+    max_iters: usize,
 ) -> (usize, usize) {
     let (nrows, ncols) = a.shape();
     let width = c.nrows();
     let mut total_iterations = 0;
     let mut coefficient_updates = 0;
-    loop {
+    for _ in 0..max_iters {
         let mut improved = false;
         for j in 0..width {
             let mut c_j = c.rb().to_owned();
@@ -396,9 +427,10 @@ fn improve_signs_then_coefficients_repeatedly(
             *r = a.minus(smat, tmat, kmat, c.rb());
             coefficient_updates += 1;
         } else {
-            return (total_iterations, coefficient_updates);
+            break;
         }
     }
+    (total_iterations, coefficient_updates)
 }
 
 // layout: [a0, a1, a2] where each ai is column-major

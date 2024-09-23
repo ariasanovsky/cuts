@@ -17,8 +17,8 @@ struct Args {
     #[arg(short = 'o')]
     output: std::path::PathBuf,
     /// The width
-    #[arg(short = 'c')]
-    compression_rate: f64,
+    #[arg(short = 'w')]
+    width: usize,
     /// The number of blocks to use in delayed matmul
     #[arg(short = 'b')]
     block_size: usize,
@@ -31,10 +31,16 @@ fn main() -> eyre::Result<()> {
     let Args {
         input,
         output,
-        compression_rate,
+        width,
         block_size,
         threads: _,
     } = Args::try_parse()?;
+    let stem = input
+        .file_stem()
+        .unwrap()
+        .to_os_string()
+        .into_string()
+        .unwrap();
     let img = open(input)?.into_rgb8();
     let (nrows, ncols) = img.dimensions();
     let (nrows, ncols): (usize, usize) = (nrows as _, ncols as _);
@@ -49,8 +55,8 @@ fn main() -> eyre::Result<()> {
     let mut remainder = Remainder::new(&t, &dim, &stride);
     let original_bits = total_dim * 8;
     let width_bits = remainder.width_bits();
-    let width = original_bits as f64 * compression_rate / width_bits as f64;
-    let width = width as usize;
+    // let width = original_bits as f64 * compression_rate / width_bits as f64;
+    // let width = width as usize;
     let nbytes = (width * width_bits).div_ceil(8);
     dbg!(width, nbytes);
     let mut cut = Cut::new(&dim, block_size);
@@ -70,7 +76,7 @@ fn main() -> eyre::Result<()> {
     };
     let mut stack = PodStack::new(&mut mem);
     let rng = &mut StdRng::seed_from_u64(0);
-    let normalization = init_norm;
+    let normalization = (3 * nrows * ncols * 255 * 255) as f64;
     let mut approx = Col::zeros(total_dim);
     let mut w = 0;
     while w < width {
@@ -87,11 +93,30 @@ fn main() -> eyre::Result<()> {
         }
         remainder.update(&mut cut, stack.rb_mut());
         cut.reset();
-        {
-            let curr_error = remainder.norm_l2() / normalization;
-            println!("({w}, {curr_error}),");
-        }
+
         w += bs;
+        {
+            // let curr_error = remainder.norm_l2() as f64 / normalization.sqrt();
+            let mut curr_err: i64 = 0;
+            let out = ImageBuffer::from_fn(nrows as _, ncols as _, |i, j| {
+                let i = i as usize;
+                let j = j as usize;
+                Rgb(core::array::from_fn(|c| {
+                    let ijc = c * stride[0] + i * stride[1] + j * stride[2];
+                    let c = img.get_pixel(i as _, j as _).0[c];
+                    let approx_c = to_u8(approx[ijc]);
+                    let err = c as i64 - approx_c as i64;
+                    curr_err += err * err;
+                    approx_c
+                }))
+            });
+            let curr_err = (curr_err as f64 / normalization).sqrt();
+            let nbits = w * (nrows + ncols + 3 + 32);
+            println!("({w}, {nbits}, {curr_err}),");
+            let outpath = output.join(format!("{stem}-{w:04}.jpg"));
+            out.save(outpath)?;
+            // dbg!(nbytes);
+        }
     }
     // let mut rgb: [Mat<f32>; 3] = core::array::from_fn(|_| Mat::zeros(nrows, ncols));
     // // let mut rmat: Mat<f32> = Mat::zeros(nrows, ncols);
@@ -121,16 +146,6 @@ fn main() -> eyre::Result<()> {
     //     let r = mat.expand();
     //     r
     // });
-    let out = ImageBuffer::from_fn(nrows as _, ncols as _, |i, j| {
-        let i = i as usize;
-        let j = j as usize;
-        Rgb(core::array::from_fn(|c| {
-            let ijc = c * stride[0] + i * stride[1] + j * stride[2];
-            to_u8(approx[ijc])
-        }))
-    });
-    out.save(output)?;
-    dbg!(nbytes);
     Ok(())
 }
 
@@ -138,4 +153,16 @@ fn to_u8(x: f32) -> u8 {
     assert!(x.is_finite());
     let x = x.clamp(0.0, 255.0);
     x.round() as _
+}
+
+fn total_error(a: &[f32], bytes: &[u8]) -> i64 {
+    assert!(a.len() == bytes.len());
+    let mut err: i64 = 0;
+    for (a, b) in a.iter().zip(bytes.iter()) {
+        let a = a.clamp(0.0, 255.0).round() as i64;
+        let b = *b as i64;
+        let e = a - b;
+        err += e * e
+    }
+    err
 }
