@@ -145,13 +145,14 @@ fn main() -> eyre::Result<()> {
                     _ => unreachable!(),
                 };
             }
-            RgbVector::Columns { width: _, r, g, b } => match mats[i_max].2.as_mut() {
+            RgbVector::Columns { width, r, g, b } => match mats[i_max].2.as_mut() {
                 RgbVectorMut::Columns {
-                    width,
+                    width: _,
                     r: r_new,
                     g: g_new,
                     b: b_new,
                 } => {
+                    *width += 1;
                     r.copy_from(r_new);
                     g.copy_from(g_new);
                     b.copy_from(b_new);
@@ -160,16 +161,16 @@ fn main() -> eyre::Result<()> {
             },
         }
         r = a.minus(&smat, &tmat, rgb.as_ref());
-        let improvements = (0, 0);
-        // let improvements = improve_signs_then_coefficients_repeatedly(
-        //     &a,
-        //     &mut r,
-        //     &mut smat,
-        //     &mut tmat,
-        //     rgb.as_mut(),
-        //     stack.rb_mut(),
-        //     1,
-        // );
+        // let improvements = (0, 0);
+        let improvements = improve_signs_then_coefficients_repeatedly(
+            &a,
+            &mut r,
+            &mut smat,
+            &mut tmat,
+            rgb.as_mut(),
+            stack.rb_mut(),
+            1,
+        );
         let approx = a.col() - r.col();
         let rel_error =
             ((total_error(approx.as_slice(), &bytes.data) as f64) / (init_norm as f64)).sqrt();
@@ -509,7 +510,12 @@ impl<'short> Reborrow<'short> for RgbVectorMut<'_> {
                 kmat,
                 c: c.as_ref(),
             },
-            _ => todo!(),
+            RgbVectorMut::Columns { width, r, g, b } => RgbVectorRef::Columns {
+                width: *width,
+                r: r.rb(),
+                g: g.rb(),
+                b: b.rb(),
+            },
         }
     }
 }
@@ -601,9 +607,10 @@ fn improve_signs_then_coefficients_repeatedly(
     mut stack: PodStack,
     max_iters: usize,
 ) -> (usize, usize) {
+    let remainder = r;
     let (nrows, ncols) = a.shape();
     let width = rgb.width();
-    dbg!(width);
+    // dbg!(width);
     let mut total_iterations = 0;
     let mut coefficient_updates = 0;
     match rgb {
@@ -697,7 +704,7 @@ fn improve_signs_then_coefficients_repeatedly(
                         };
                         // let rgb = todo!();
                         let _ = regress(a, smat, tmat, rgb.rb_mut());
-                        *r = a.minus(smat, tmat, rgb.rb());
+                        *remainder = a.minus(smat, tmat, rgb.rb());
                         improved = true;
                     }
                 }
@@ -708,7 +715,7 @@ fn improve_signs_then_coefficients_repeatedly(
                         c: c.rb_mut(),
                     };
                     let _ = regress(a, &smat, &tmat, rgb.rb_mut());
-                    *r = a.minus(smat, tmat, rgb.rb());
+                    *remainder = a.minus(smat, tmat, rgb.rb());
                     coefficient_updates += 1;
                 } else {
                     break;
@@ -716,8 +723,138 @@ fn improve_signs_then_coefficients_repeatedly(
             }
             (total_iterations, coefficient_updates)
         }
-        RgbVectorMut::Columns { width, r, g, b } => {
-            todo!()
+        RgbVectorMut::Columns {
+            width,
+            mut r,
+            mut g,
+            mut b,
+        } => {
+            // todo!();
+            for _ in 0..max_iters {
+                let mut improved = false;
+                for j in 0..width {
+                    let k = &[r[j], g[j], b[j]];
+                    let mut r_j = r.rb().to_owned();
+                    r_j[j] = 0.0;
+                    let mut g_j = g.rb().to_owned();
+                    g_j[j] = 0.0;
+                    let mut b_j = b.rb().to_owned();
+                    b_j[j] = 0.0;
+                    let rgb_j = RgbVectorRef::Columns {
+                        width,
+                        r: r_j.as_ref(),
+                        g: g_j.as_ref(),
+                        b: b_j.as_ref(),
+                    };
+                    let r_j = a.minus(smat, tmat, rgb_j);
+                    let r_j = r_j.combine_colors(k);
+                    let mut s_j = smat.as_mat_mut().col_mut(j);
+                    let mut t_j = tmat.as_mat_mut().col_mut(j);
+                    let two_remainder = faer::scale(2.0f32) * r_j.as_ref();
+                    let two_remainder_transposed = two_remainder.transpose().to_owned();
+                    let (bit_rows, bit_cols) = (nrows.div_ceil(64), ncols.div_ceil(64));
+                    let mut s_ones = vec![0u64; bit_rows].into_boxed_slice();
+                    let mut t_ones = vec![0u64; bit_cols].into_boxed_slice();
+                    {
+                        // let s_ones = s_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+                        s_j.as_ref().iter().enumerate().for_each(|(i, si)| {
+                            let pos = i / 64;
+                            let rem = i % 64;
+                            let signs = &mut s_ones[pos];
+                            if si.is_sign_negative() {
+                                *signs |= 1 << rem
+                            }
+                        });
+                        // let t_ones = t_ones.rb_mut().storage_mut().col_as_slice_mut(0);
+                        t_j.as_ref().iter().enumerate().for_each(|(i, ti)| {
+                            let pos = i / 64;
+                            let rem = i % 64;
+                            let signs = &mut t_ones[pos];
+                            if ti.is_sign_negative() {
+                                *signs |= 1 << rem
+                            }
+                        });
+                    }
+                    let s_ones =
+                        cuts::MatMut::from_col_major_slice(&mut s_ones, bit_rows, 1, bit_rows);
+                    let mut s_ones = SignMatMut::from_storage(s_ones, nrows);
+                    let t_ones =
+                        cuts::MatMut::from_col_major_slice(&mut t_ones, bit_cols, 1, bit_cols);
+                    let mut t_ones = SignMatMut::from_storage(t_ones, ncols);
+                    let _ = improve_greedy_cut(
+                        two_remainder.as_ref(),
+                        two_remainder_transposed.as_ref(),
+                        // s_j.as_mut(),
+                        // t_j.as_mut(),
+                        s_ones.rb_mut(),
+                        t_ones.rb_mut(),
+                        stack.rb_mut(),
+                    );
+                    let mut improved_signs = 0;
+                    let s_signs = s_ones.storage().col_as_slice(0);
+                    s_j.iter_mut()
+                        .zip(s_signs.iter().flat_map(|&signs| {
+                            (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
+                        }))
+                        .for_each(|(si, s_sign)| {
+                            if *si != s_sign {
+                                improved_signs += 1;
+                                *si = s_sign
+                            }
+                        });
+                    let t_signs = t_ones.storage().col_as_slice(0);
+                    t_j.iter_mut()
+                        .zip(t_signs.iter().flat_map(|&signs| {
+                            (0..64).map(move |i| if signs & (1 << i) != 0 { -1.0f32 } else { 1.0 })
+                        }))
+                        .for_each(|(ti, t_sign)| {
+                            if *ti != t_sign {
+                                improved_signs += 1;
+                                *ti = t_sign
+                            }
+                        });
+
+                    if improved_signs != 0 {
+                        total_iterations += improved_signs;
+                        let mut rgb = RgbVectorMut::Columns {
+                            width,
+                            r: r.rb_mut(),
+                            g: g.rb_mut(),
+                            b: b.rb_mut(),
+                        };
+                        // let mut rgb = RgbVectorMut::Blowup {
+                        //     width,
+                        //     kmat,
+                        //     c: c.rb_mut(),
+                        // };
+                        // let rgb = todo!();
+                        let _ = regress(a, smat, tmat, rgb.rb_mut());
+                        *remainder = a.minus(smat, tmat, rgb.rb());
+                        improved = true;
+                        // todo!();
+                    }
+                }
+                if improved {
+                    // todo!();
+                    // let mut rgb = RgbVectorMut::Blowup {
+                    //     width,
+                    //     kmat,
+                    //     c: c.rb_mut(),
+                    // };
+                    let mut rgb = RgbVectorMut::Columns {
+                        width,
+                        r: r.rb_mut(),
+                        g: g.rb_mut(),
+                        b: b.rb_mut(),
+                    };
+                    let _ = regress(a, smat, tmat, rgb.rb_mut());
+                    *remainder = a.minus(smat, tmat, rgb.rb());
+                    coefficient_updates += 1;
+                } else {
+                    break;
+                }
+            }
+            (total_iterations, coefficient_updates)
         }
     }
 }
